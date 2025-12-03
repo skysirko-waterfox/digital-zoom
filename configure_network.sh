@@ -22,15 +22,23 @@ fi
 
 echo "==> USB interface detected: ${USB_IF}"
 
-## -------------------------------------------------------------------
-## Disable NetworkManager (it interferes with systemd-networkd)
-## -------------------------------------------------------------------
-#echo "==> Disabling NetworkManager..."
-#sudo systemctl disable --now NetworkManager.service || true
-#sudo systemctl disable --now NetworkManager-wait-online.service || true
+# -------------------------------------------------------------------
+# Disable Netplan completely (prevents overriding systemd-networkd)
+# -------------------------------------------------------------------
+echo "==> Disabling netplan..."
+
+if [[ -d /etc/netplan ]]; then
+  sudo mv /etc/netplan /etc/netplan.disabled.$(date +%s)
+  echo "    Moved /etc/netplan → /etc/netplan.disabled.*"
+fi
+
+if ls /run/systemd/network/10-netplan* &>/dev/null; then
+  sudo rm -f /run/systemd/network/10-netplan*
+  echo "    Removed active netplan-generated configs"
+fi
 
 # -------------------------------------------------------------------
-# Enable systemd-networkd + systemd-resolved
+# Enable systemd-networkd + resolved
 # -------------------------------------------------------------------
 echo "==> Enabling systemd-networkd..."
 sudo systemctl enable --now systemd-networkd.service
@@ -50,11 +58,11 @@ Address=${CAM_IP}
 EOF
 
 # -------------------------------------------------------------------
-# Create systemd-networkd config for USB Ethernet (laptop link)
+# Create systemd-networkd config for USB Ethernet
 # -------------------------------------------------------------------
 echo "==> Creating config for USB interface (${USB_IF})..."
 
-sudo tee /etc/systemd/network/20-${USB_IF}.network >/dev/null <<EOF
+sudo tee /etc/systemd/network/5-${USB_IF}.network >/dev/null <<EOF
 [Match]
 Name=${USB_IF}
 
@@ -65,7 +73,7 @@ EOF
 # -------------------------------------------------------------------
 # Apply changes
 # -------------------------------------------------------------------
-echo "==> Reloading networkd..."
+echo "==> Reloading systemd-networkd..."
 sudo systemctl restart systemd-networkd
 
 echo ""
