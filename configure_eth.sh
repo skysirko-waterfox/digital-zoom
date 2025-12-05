@@ -28,12 +28,12 @@ echo "==> USB interface detected: ${USB_IF}"
 echo "==> Disabling netplan..."
 
 if [[ -d /etc/netplan ]]; then
-  sudo mv /etc/netplan /etc/netplan.disabled.$(date +%s)
+  mv /etc/netplan /etc/netplan.disabled.$(date +%s)
   echo "    Moved /etc/netplan → /etc/netplan.disabled.*"
 fi
 
 if ls /run/systemd/network/10-netplan* &>/dev/null; then
-  sudo rm -f /run/systemd/network/10-netplan*
+  rm -f /run/systemd/network/10-netplan*
   echo "    Removed active netplan-generated configs"
 fi
 
@@ -41,15 +41,15 @@ fi
 # Enable systemd-networkd + resolved
 # -------------------------------------------------------------------
 echo "==> Enabling systemd-networkd..."
-sudo systemctl enable --now systemd-networkd.service
-sudo systemctl enable --now systemd-resolved.service
+systemctl enable systemd-networkd.service
+systemctl enable systemd-resolved.service
 
 # -------------------------------------------------------------------
 # Create systemd-networkd config for eth0 (camera network)
 # -------------------------------------------------------------------
 echo "==> Creating config for camera interface (${CAM_IF})..."
 
-sudo tee /etc/systemd/network/10-${CAM_IF}.network >/dev/null <<EOF
+tee /etc/systemd/network/10-${CAM_IF}.network >/dev/null <<EOF
 [Match]
 Name=${CAM_IF}
 
@@ -62,7 +62,7 @@ EOF
 # -------------------------------------------------------------------
 echo "==> Creating config for USB interface (${USB_IF})..."
 
-sudo tee /etc/systemd/network/5-${USB_IF}.network >/dev/null <<EOF
+tee /etc/systemd/network/5-${USB_IF}.network >/dev/null <<EOF
 [Match]
 Name=${USB_IF}
 
@@ -74,7 +74,7 @@ EOF
 # Apply changes
 # -------------------------------------------------------------------
 echo "==> Reloading systemd-networkd..."
-sudo systemctl restart systemd-networkd
+systemctl restart systemd-networkd
 
 echo ""
 echo "==============================================================="
