@@ -2,8 +2,10 @@ from pymavlink import mavutil
 import time
 import glob
 import os
+import subprocess
 
 MATEK_FOLDER_PATH = "/dev/serial/by-id"
+MAJESTIC_CONFIG_PATH = os.environ.get("MAJESTIC_CONFIG_PATH", "/etc/majestic.yaml")
 
 # Baud rate of the UART between RunCam (OpenIPC) and the Matek FC.
 # Must match SERIALx_BAUD on the ArduPilot side.
@@ -14,6 +16,86 @@ BAUD = 57600
 # 2 is conventionally the first companion computer on the vehicle.
 # Must be unique on the MAVLink network.
 SYSTEM_SOURCE = 2
+
+CROPS = [
+    "0x0x3840x2160",
+    "320x180x3520x1980",
+    "640x360x3200x1800"
+    "960x540x2880x1620"
+]
+CROP_INDEX_MIN = 0
+CROP_INDEX_MAX = len(CROPS)
+CROP_INDEX_CURRENT = CROP_INDEX_MIN
+
+
+def _reload_majestic():
+    """Ask Majestic to reload its configuration so the new crop takes effect."""
+    for command in (["killall", "-1", "majestic"], ["killall", "majestic"]):
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return
+        except FileNotFoundError:
+            print("killall command not available; unable to signal Majestic.")
+            return
+        except subprocess.CalledProcessError:
+            # Try the next option (plain killall) before giving up.
+            continue
+
+    print("Unable to signal Majestic; crop change may require manual restart.")
+
+
+def set_crop_in_config(crop: str, ensure_exists: bool = False) -> None:
+    """Update the crop entry under video0 inside the Majestic configuration."""
+    try:
+        with open(MAJESTIC_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            lines = config_file.readlines()
+    except FileNotFoundError:
+        print(f"Majestic config not found at {MAJESTIC_CONFIG_PATH}; skipping crop update.")
+        return
+
+    in_video0 = False
+    updated = False
+    section_indent = ""
+    insert_index = None
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+
+        if stripped.startswith("video0:"):
+            in_video0 = True
+            section_indent = line[: len(line) - len(line.lstrip())]
+            insert_index = index + 1
+            continue
+
+        # Leaving the video0 section once indentation drops back to column 0.
+        if in_video0 and line and not line[0].isspace():
+            break
+
+        if in_video0 and stripped.startswith("crop:"):
+            indent = line[: len(line) - len(line.lstrip())]
+            lines[index] = f"{indent}crop: {crop}\n"
+            updated = True
+            break
+
+    if not updated:
+        if ensure_exists and insert_index is not None:
+            indent = section_indent + "  "
+            lines.insert(insert_index, f"{indent}crop: {crop}\n")
+            updated = True
+        else:
+            print("crop entry inside video0 not found; no changes written.")
+            return
+
+    with open(MAJESTIC_CONFIG_PATH, "w", encoding="utf-8") as config_file:
+        config_file.writelines(lines)
+
+    _reload_majestic()
+
 
 def connect_to_matek():
     files = glob.glob(os.path.join(MATEK_FOLDER_PATH, "*"))
@@ -39,6 +121,29 @@ def connect_to_matek():
 
     raise Exception("Matek not found.")
 
+def setup():
+    crop = CROPS[CROP_INDEX_CURRENT]
+    set_crop_in_config(crop, ensure_exists=True)
+    return
+
+def execute(command: str) -> None:
+    global CROP_INDEX_CURRENT
+
+    if command == "zoom_in" and CROP_INDEX_CURRENT < CROP_INDEX_MAX:
+        CROP_INDEX_CURRENT += 1
+        crop = CROPS[CROP_INDEX_CURRENT]
+
+        set_crop_in_config(crop)
+        return
+
+    if command == "zoom_out" and CROP_INDEX_CURRENT > CROP_INDEX_MIN:
+        CROP_INDEX_CURRENT -= 1
+        crop = CROPS[CROP_INDEX_CURRENT]
+
+        set_crop_in_config(crop)
+        return
+
+
 def main():
     connection = connect_to_matek()
 
@@ -47,6 +152,8 @@ def main():
     print("waiting for heartbeat from autopilot...")
     connection.wait_heartbeat()
     print("!!! heartbeat received !!!")
+
+    setup()
 
     last = 0
     while True:
@@ -73,8 +180,8 @@ def main():
 
         msg = connection.recv_match(type="STATUSTEXT", blocking=False)
 
-        if msg:
-            print(msg.text)
+        if msg and msg.text in ["zoom_in", "zoom_out"]:
+            execute(msg.text)
 
         # Small sleep to avoid busy-looping the CPU.
         time.sleep(0.01)
