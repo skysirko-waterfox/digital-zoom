@@ -1,2 +1,5 @@
 .idea
 .venv
+runcam/zig-cache
+runcam/zig-macos-aarch64-0.13.0
+runcam/zoom_control
