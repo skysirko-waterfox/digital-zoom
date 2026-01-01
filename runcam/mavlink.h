@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define MAVLINK_V2_STX ((uint8_t)0xFD)
-#define MAVLINK_V1_STX ((uint8_t)0xFE)
+#define MAVLINK_V2_HEADER_LEN 9
 #define MAVLINK_SIGNATURE_LEN 13  /* bytes appended when a MAVLink v2 frame is signed */
 
 enum {
@@ -24,7 +24,6 @@ struct mavlink_message {
     uint8_t sysid;
     uint8_t compid;
     uint8_t payload_len;
-    bool mavlink2;
     uint8_t payload[255];
 };
 
@@ -37,7 +36,6 @@ struct mavlink_parser {
         STATE_CRC2,
         STATE_SIGNATURE
     } state;
-    bool mavlink2;
     uint8_t header[10];
     size_t header_len_expected;
     size_t header_pos;

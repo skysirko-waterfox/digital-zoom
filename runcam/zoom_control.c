@@ -300,7 +300,7 @@ static void handle_message(const struct mavlink_message *msg) {
     uint16_t text_id = 0;
     uint8_t chunk_seq = 0;
     size_t text_len = 0;
-    if (msg->mavlink2 && msg->payload_len >= 54) {
+    if (msg->payload_len >= 54) {
         text_len = 50;
         text_id = (uint16_t)msg->payload[51] | ((uint16_t)msg->payload[52] << 8);
         chunk_seq = msg->payload[53];

@@ -45,20 +45,20 @@ void mavlink_parser_reset(struct mavlink_parser *parser) {
     parser->payload_len = 0;
     parser->signature_pos = 0;
     parser->signed_frame = false;
-    parser->mavlink2 = false;
 }
 
+/*
+ * Streaming MAVLink v2 parser: feed it one byte at a time and it will return
+ * true when a full, CRC-checked message is assembled. The function implements
+ * the standard MAVLink state machine (start-of-frame -> header -> payload ->
+ * CRC -> optional signature), so call sites can treat the serial port as a raw
+ * byte stream.
+ */
 bool mavlink_parser_feed(struct mavlink_parser *parser, uint8_t byte, struct mavlink_message *msg) {
     switch (parser->state) {
         case STATE_WAIT_STX:
             if (byte == MAVLINK_V2_STX) {
-                parser->mavlink2 = true;
-                parser->header_len_expected = 9;
-                parser->header_pos = 0;
-                parser->state = STATE_HEADER;
-            } else if (byte == MAVLINK_V1_STX) {
-                parser->mavlink2 = false;
-                parser->header_len_expected = 5;
+                parser->header_len_expected = MAVLINK_V2_HEADER_LEN;
                 parser->header_pos = 0;
                 parser->state = STATE_HEADER;
             }
@@ -72,12 +72,8 @@ bool mavlink_parser_feed(struct mavlink_parser *parser, uint8_t byte, struct mav
                     mavlink_parser_reset(parser);
                     break;
                 }
-                if (parser->mavlink2) {
-                    parser->incompat_flags = parser->header[1];
-                    parser->signed_frame = (parser->incompat_flags & 0x01U) != 0;
-                } else {
-                    parser->signed_frame = false;
-                }
+                parser->incompat_flags = parser->header[1];
+                parser->signed_frame = (parser->incompat_flags & 0x01U) != 0;
                 parser->state = parser->payload_len ? STATE_PAYLOAD : STATE_CRC1;
             }
             break;
@@ -93,7 +89,7 @@ bool mavlink_parser_feed(struct mavlink_parser *parser, uint8_t byte, struct mav
             break;
         case STATE_CRC2:
             parser->crc_received |= (uint16_t)byte << 8;
-            if (parser->mavlink2 && parser->signed_frame) {
+            if (parser->signed_frame) {
                 parser->signature_pos = 0;
                 parser->state = STATE_SIGNATURE;
             } else {
@@ -112,28 +108,20 @@ bool mavlink_parser_feed(struct mavlink_parser *parser, uint8_t byte, struct mav
     return false;
 
 finalize: {
-        msg->mavlink2 = parser->mavlink2;
         msg->payload_len = parser->payload_len;
         memcpy(msg->payload, parser->payload, parser->payload_len);
         uint8_t bytes_header[10];
-        size_t count = parser->mavlink2 ? 9 : 5;
-        memcpy(bytes_header, parser->header, count);
+        memcpy(bytes_header, parser->header, MAVLINK_V2_HEADER_LEN);
 
         uint16_t crc = 0xFFFF;
-        crc = mavlink_crc_accumulate_buffer(bytes_header, count, crc);
+        crc = mavlink_crc_accumulate_buffer(bytes_header, MAVLINK_V2_HEADER_LEN, crc);
         crc = mavlink_crc_accumulate_buffer(parser->payload, parser->payload_len, crc);
 
-        if (parser->mavlink2) {
-            msg->sysid = parser->header[4];
-            msg->compid = parser->header[5];
-            msg->msgid = (uint32_t)parser->header[6] |
-                         ((uint32_t)parser->header[7] << 8) |
-                         ((uint32_t)parser->header[8] << 16);
-        } else {
-            msg->sysid = parser->header[2];
-            msg->compid = parser->header[3];
-            msg->msgid = parser->header[4];
-        }
+        msg->sysid = parser->header[4];
+        msg->compid = parser->header[5];
+        msg->msgid = (uint32_t)parser->header[6] |
+                     ((uint32_t)parser->header[7] << 8) |
+                     ((uint32_t)parser->header[8] << 16);
 
         uint8_t extra = 0;
         if (!lookup_crc_extra(msg->msgid, &extra)) {
@@ -166,10 +154,7 @@ uint16_t mavlink_crc_accumulate_buffer(const uint8_t *buf, size_t len, uint16_t 
 }
 
 /* Serialize and send a heartbeat frame for the provided system/component IDs. */
-bool mavlink_send_heartbeat(int fd,
-                            uint8_t seq,
-                            uint8_t system_id,
-                            uint8_t component_id) {
+bool mavlink_send_heartbeat(int fd, uint8_t seq, uint8_t system_id, uint8_t component_id) {
     uint8_t payload[9];
     uint32_t custom_mode = 0;
     memcpy(payload, &custom_mode, sizeof(custom_mode));
