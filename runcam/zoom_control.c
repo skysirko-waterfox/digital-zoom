@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,7 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "mavlink_proto.h"
+#include "mavlink.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -36,37 +35,6 @@ struct line_buffer {
     char **lines;
     size_t count;
     size_t capacity;
-};
-
-struct mavlink_parser {
-    enum {
-        STATE_WAIT_STX,
-        STATE_HEADER,
-        STATE_PAYLOAD,
-        STATE_CRC1,
-        STATE_CRC2,
-        STATE_SIGNATURE
-    } state;
-    bool mavlink2;
-    uint8_t header[10];
-    size_t header_len_expected;
-    size_t header_pos;
-    uint8_t payload[255];
-    uint8_t payload_len;
-    uint8_t payload_pos;
-    uint8_t incompat_flags;
-    bool signed_frame;
-    uint8_t signature_pos;
-    uint16_t crc_received;
-};
-
-struct mavlink_message {
-    uint32_t msgid;
-    uint8_t sysid;
-    uint8_t compid;
-    uint8_t payload_len;
-    bool mavlink2;
-    uint8_t payload[255];
 };
 
 static const char *config_path;
@@ -257,133 +225,6 @@ static bool set_crop_in_config(const char *crop, bool ensure_exists) {
     return updated;
 }
 
-static bool lookup_crc_extra(uint32_t msgid, uint8_t *extra) {
-    switch (msgid) {
-        case MAVLINK_MSG_ID_HEARTBEAT:
-            *extra = 50;
-            return true;
-        case MAVLINK_MSG_ID_STATUSTEXT:
-            *extra = 83;
-            return true;
-        default:
-            return false;
-    }
-}
-
-static void parser_reset(struct mavlink_parser *parser) {
-    parser->state = STATE_WAIT_STX;
-    parser->header_pos = 0;
-    parser->payload_pos = 0;
-    parser->payload_len = 0;
-    parser->signature_pos = 0;
-    parser->signed_frame = false;
-    parser->mavlink2 = false;
-}
-
-static bool parser_feed(struct mavlink_parser *parser, uint8_t byte, struct mavlink_message *msg) {
-    switch (parser->state) {
-        case STATE_WAIT_STX:
-            if (byte == MAVLINK_V2_STX) {
-                parser->mavlink2 = true;
-                parser->header_len_expected = 9;
-                parser->header_pos = 0;
-                parser->state = STATE_HEADER;
-            } else if (byte == MAVLINK_V1_STX) {
-                parser->mavlink2 = false;
-                parser->header_len_expected = 5;
-                parser->header_pos = 0;
-                parser->state = STATE_HEADER;
-            }
-            break;
-        case STATE_HEADER:
-            parser->header[parser->header_pos++] = byte;
-            if (parser->header_pos == parser->header_len_expected) {
-                parser->payload_len = parser->header[0];
-                parser->payload_pos = 0;
-                if (parser->payload_len > sizeof(parser->payload)) {
-                    parser_reset(parser);
-                    break;
-                }
-                if (parser->mavlink2) {
-                    parser->incompat_flags = parser->header[1];
-                    parser->signed_frame = (parser->incompat_flags & 0x01U) != 0;
-                } else {
-                    parser->signed_frame = false;
-                }
-                parser->state = parser->payload_len ? STATE_PAYLOAD : STATE_CRC1;
-            }
-            break;
-        case STATE_PAYLOAD:
-            parser->payload[parser->payload_pos++] = byte;
-            if (parser->payload_pos == parser->payload_len) {
-                parser->state = STATE_CRC1;
-            }
-            break;
-        case STATE_CRC1:
-            parser->crc_received = byte;
-            parser->state = STATE_CRC2;
-            break;
-        case STATE_CRC2:
-            parser->crc_received |= (uint16_t)byte << 8;
-            if (parser->mavlink2 && parser->signed_frame) {
-                parser->signature_pos = 0;
-                parser->state = STATE_SIGNATURE;
-            } else {
-                parser->state = STATE_WAIT_STX;
-                goto finalize;
-            }
-            break;
-        case STATE_SIGNATURE:
-            parser->signature_pos++;
-            if (parser->signature_pos == MAVLINK_SIGNATURE_LEN) {
-                parser->state = STATE_WAIT_STX;
-                goto finalize;
-            }
-            break;
-    }
-    return false;
-
-finalize: {
-        msg->mavlink2 = parser->mavlink2;
-        msg->payload_len = parser->payload_len;
-        memcpy(msg->payload, parser->payload, parser->payload_len);
-        uint8_t bytes_header[10];
-        size_t count = 0;
-        if (parser->mavlink2) {
-            count = 9;
-        } else {
-            count = 5;
-        }
-        memcpy(bytes_header, parser->header, count);
-
-        uint16_t crc = 0xFFFF;
-        crc = mavlink_crc_accumulate_buffer(bytes_header, count, crc);
-        crc = mavlink_crc_accumulate_buffer(parser->payload, parser->payload_len, crc);
-
-        if (parser->mavlink2) {
-            msg->sysid = parser->header[4];
-            msg->compid = parser->header[5];
-            msg->msgid = (uint32_t)parser->header[6] |
-                         ((uint32_t)parser->header[7] << 8) |
-                         ((uint32_t)parser->header[8] << 16);
-        } else {
-            msg->sysid = parser->header[2];
-            msg->compid = parser->header[3];
-            msg->msgid = parser->header[4];
-        }
-
-        uint8_t extra = 0;
-        if (!lookup_crc_extra(msg->msgid, &extra)) {
-            return false;
-        }
-        crc = mavlink_crc_accumulate_buffer(&extra, 1, crc);
-        if (crc == parser->crc_received) {
-            return true;
-        }
-        return false;
-    }
-}
-
 static bool configure_serial(int fd) {
     struct termios tty;
     if (tcgetattr(fd, &tty) != 0) {
@@ -492,7 +333,7 @@ static void handle_message(const struct mavlink_message *msg) {
 
 static void event_loop(int fd) {
     struct mavlink_parser parser = {0};
-    parser_reset(&parser);
+    mavlink_parser_reset(&parser);
     uint8_t seq = 0;
     double last_heartbeat = 0.0;
     bool heartbeat_received = false;
@@ -504,32 +345,19 @@ static void event_loop(int fd) {
             mavlink_send_heartbeat(fd, seq++, SYSTEM_ID, COMPONENT_ID);
             last_heartbeat = now;
         }
-        struct pollfd pfd = {
-            .fd = fd,
-            .events = POLLIN,
-        };
-        int events = poll(&pfd, 1, 200);
-        if (events > 0 && (pfd.revents & POLLIN)) {
-            uint8_t buffer[128];
-            ssize_t read_len = read(fd, buffer, sizeof(buffer));
-            if (read_len > 0) {
-                for (ssize_t i = 0; i < read_len; ++i) {
-                    struct mavlink_message msg;
-                    if (parser_feed(&parser, buffer[i], &msg)) {
-                        if (msg.msgid == MAVLINK_MSG_ID_HEARTBEAT) {
-                            heartbeat_received = true;
-                            break;
-                        }
-                    }
-                }
-            }
+        int status = mavlink_read_message_by_id(fd, &parser, MAVLINK_MSG_ID_HEARTBEAT, 200, NULL);
+        if (status < 0) {
+            return;
+        }
+        if (status > 0) {
+            heartbeat_received = true;
         }
     }
     printf("!!! heartbeat received !!!\n");
 
     apply_crop_index();
 
-    parser_reset(&parser);
+    mavlink_parser_reset(&parser);
     last_heartbeat = 0.0;
     while (true) {
         double now = monotonic_seconds();
@@ -537,24 +365,13 @@ static void event_loop(int fd) {
             mavlink_send_heartbeat(fd, seq++, SYSTEM_ID, COMPONENT_ID);
             last_heartbeat = now;
         }
-        struct pollfd pfd = {.fd = fd, .events = POLLIN};
-        int events = poll(&pfd, 1, 100);
-        if (events > 0 && (pfd.revents & POLLIN)) {
-            uint8_t buffer[256];
-            ssize_t read_len = read(fd, buffer, sizeof(buffer));
-            if (read_len > 0) {
-                for (ssize_t i = 0; i < read_len; ++i) {
-                    struct mavlink_message msg;
-                    if (parser_feed(&parser, buffer[i], &msg)) {
-                        handle_message(&msg);
-                    }
-                }
-            } else if (read_len == 0) {
-                continue;
-            } else if (errno != EAGAIN && errno != EINTR) {
-                perror("read");
-                break;
-            }
+        struct mavlink_message msg;
+        int status = mavlink_read_message_by_id(fd, &parser, MAVLINK_MSG_ID_STATUSTEXT, 100, &msg);
+        if (status < 0) {
+            break;
+        }
+        if (status > 0) {
+            handle_message(&msg);
         }
     }
 }
